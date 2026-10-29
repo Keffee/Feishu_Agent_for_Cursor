@@ -29,6 +29,8 @@ const CLI_ENV = {
 
 // Maps Feishu message_id (om_xxx) -> { seq, chatId, winId, name } for quote-reply routing
 const msgTargetMap = new Map();
+// Tracks chatIds where Feishu just sent a message so even sub-3s replies are caught
+const pendingExpectReply = new Set();
 let lastAlertSession = null;
 
 function rememberMessageTarget(rawOut, session) {
@@ -220,6 +222,7 @@ async function handleIncomingFeishu(ev) {
       await sendText(`找不到编号 #${prefixMatch[1]} 的进程（发「状态」查看列表）`, msgId);
       return;
     }
+    pendingExpectReply.add(target.chatId);
     await sendToSession(target, prefixMatch[2]);
     await sendText(`📨 已直达子进程 #${target.seq}（${target.name}），跑完后会自动向你汇报`, msgId, target);
     return;
@@ -228,6 +231,7 @@ async function handleIncomingFeishu(ev) {
   // Route B: User quote-replied a sub-process notification card in Feishu
   if (quotedSession && !quotedSession.isMaster) {
     const target = await resolveTarget(quotedSession.chatId) || quotedSession;
+    pendingExpectReply.add(target.chatId);
     await sendToSession(target, text);
     await sendText(`📨 [引用直达] 已发给子进程 #${target.seq || ''}（${target.name}），跑完后会自动向你汇报`, msgId, target);
     return;
@@ -239,6 +243,7 @@ async function handleIncomingFeishu(ev) {
     await sendText('未找到总控 Agent 进程，请确认 Cursor 窗口已打开且开启了 CDP 端口', msgId);
     return;
   }
+  pendingExpectReply.add(master.chatId);
   await sendToSession(master, text);
   await sendText(
     `📨 已发给总控 Agent（#${master.seq}），思考或操作完成后会自动推送给你`,
@@ -249,7 +254,7 @@ async function handleIncomingFeishu(ev) {
 
 // Proactive background watcher: monitors ALL sessions (including sidebar background items in Cursor Agents)
 function startProactiveWatcher() {
-  const stateMap = new Map(); // chatId -> { busy, idleTicks, waiting, waitTicks, toldWait, pushedAssistKey }
+  const stateMap = new Map(); // chatId -> { mounted, busy, idleTicks, waiting, waitTicks, toldWait, lastHumanKey, pushedAssistKey, maxPairIndex }
   const pushedAssistKeys = new Set();
   let running = false;
 
@@ -263,14 +268,32 @@ function startProactiveWatcher() {
         if (!prev) {
           if (s.lastAssistKey) pushedAssistKeys.add(s.lastAssistKey);
           stateMap.set(s.chatId, {
+            mounted: Boolean(s.mounted),
             busy: s.busy,
             idleTicks: 0,
             waiting: s.waiting || null,
             waitTicks: 0,
             toldWait: Boolean(s.waiting),
+            lastHumanKey: s.lastHumanKey || null,
             pushedAssistKey: s.lastAssistKey || null,
+            maxPairIndex: s.maxPairIndex ?? -1,
           });
           continue;
+        }
+
+        // If an idle session was previously unmounted in DOM and just became mounted (e.g. user clicked it or deleted a neighbor chat),
+        // snapshot its existing DOM keys as historical baseline and NEVER treat that mount event as a new reply!
+        if (!prev.mounted && s.mounted) {
+          prev.mounted = true;
+          if (!s.busy && !pendingExpectReply.has(s.chatId)) {
+            if (s.lastAssistKey) pushedAssistKeys.add(s.lastAssistKey);
+            prev.lastHumanKey = s.lastHumanKey || prev.lastHumanKey;
+            prev.pushedAssistKey = s.lastAssistKey || prev.pushedAssistKey;
+            if ((s.maxPairIndex ?? -1) > prev.maxPairIndex) prev.maxPairIndex = s.maxPairIndex;
+            continue;
+          }
+        } else {
+          prev.mounted = Boolean(s.mounted);
         }
 
         // 1. Check if session entered a waiting-for-confirmation / question state
@@ -300,19 +323,37 @@ function startProactiveWatcher() {
           }
         }
 
-        // 2. Check busy -> idle transition OR new assistant reply while idle
+        // 2. Check busy -> idle transition OR genuine sub-3s fast reply
         if (s.busy) {
           prev.busy = true;
           prev.idleTicks = 0;
+          if (s.lastHumanKey) prev.lastHumanKey = s.lastHumanKey;
+          if ((s.maxPairIndex ?? -1) > prev.maxPairIndex) prev.maxPairIndex = s.maxPairIndex;
           continue;
         }
 
         const finishedFromBusy = prev.busy && ++prev.idleTicks >= 2;
-        const newFastReply = !prev.busy && s.lastAssistKey && !pushedAssistKeys.has(s.lastAssistKey);
+        const isFreshTurn = Boolean(
+          s.lastAssistKey &&
+          !pushedAssistKeys.has(s.lastAssistKey) &&
+          (
+            pendingExpectReply.has(s.chatId) ||
+            (
+              prev.lastHumanKey &&
+              s.lastHumanKey &&
+              s.lastHumanKey !== prev.lastHumanKey &&
+              (s.maxPairIndex ?? -1) > prev.maxPairIndex &&
+              /^(now|\d+s|[12]m)$/i.test(s.timeText || '')
+            )
+          )
+        );
 
-        if (finishedFromBusy || newFastReply) {
+        if (finishedFromBusy || isFreshTurn) {
           prev.busy = false;
           prev.idleTicks = 0;
+          pendingExpectReply.delete(s.chatId);
+          if (s.lastHumanKey) prev.lastHumanKey = s.lastHumanKey;
+          if ((s.maxPairIndex ?? -1) > prev.maxPairIndex) prev.maxPairIndex = s.maxPairIndex;
           const detail = await inspectSession(s, true).catch(() => null);
           const items = detail?.items || [];
           const lastHumanIdx = items.reduce((acc, it, i) => it.k === 'human' ? i : acc, -1);

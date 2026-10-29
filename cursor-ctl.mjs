@@ -129,12 +129,16 @@ export async function discoverAllSessions() {
             const sec = li.closest('section.ui-sidebar-section');
             const repo = sec ? (sec.innerText.split('\\n')[0]?.trim() || '') : '';
             const title = (li.innerText || '').trim().replace(/\\s+/g, ' ');
+            const timeEl = li.querySelector('[data-numeric="true"]');
+            const timeText = timeEl ? (timeEl.innerText || '').trim() : '';
             const spinning = !!li.querySelector('.ui-dot-grid-loader, [aria-label="In progress"]');
             const bubble = document.querySelector('[id^="bubble-' + chatId + '-"]');
             const mounted = !!bubble;
             let paneBusy = false;
             let waiting = null;
+            let lastHumanKey = null;
             let lastAssistKey = null;
+            let maxPairIndex = -1;
             if (bubble) {
               const panel = bubble.closest('.agent-panel-conversation-shell')
                 || bubble.closest('.agent-conversation-composer__viewport')?.parentElement
@@ -142,8 +146,15 @@ export async function discoverAllSessions() {
               if (panel) {
                 paneBusy = [...panel.querySelectorAll(STOP_SEL)].some(vis);
                 const allRows = [...panel.querySelectorAll('[data-find-row-key]')];
+                for (const r of allRows) {
+                  const pi = Number(r.dataset.pairIndex);
+                  if (Number.isFinite(pi) && pi > maxPairIndex) maxPairIndex = pi;
+                }
                 const lastHumanIdx = allRows.reduce((acc, r, i) => (r.dataset.findRowKey || '').startsWith('human:') ? i : acc, -1);
                 const lastAssistIdx = allRows.reduce((acc, r, i) => (r.dataset.findRowKey || '').startsWith('assistant-markdown:') ? i : acc, -1);
+                if (lastHumanIdx >= 0) {
+                  lastHumanKey = allRows[lastHumanIdx].dataset.findRowKey || null;
+                }
                 if (lastAssistIdx >= 0 && lastAssistIdx > lastHumanIdx) {
                   lastAssistKey = allRows[lastAssistIdx].dataset.findRowKey || null;
                 }
@@ -164,7 +175,7 @@ export async function discoverAllSessions() {
                 }
               }
             }
-            out.push({ chatId, repo, title, spinning: spinning || paneBusy, waiting, lastAssistKey, mounted });
+            out.push({ chatId, repo, title, timeText, spinning: spinning || paneBusy, waiting, lastHumanKey, lastAssistKey, maxPairIndex, mounted });
           }
           return out;
         })()`);
@@ -177,9 +188,12 @@ export async function discoverAllSessions() {
             ws: win.ws,
             chatId: it.chatId,
             name: it.repo ? `${it.repo} / ${it.title}` : it.title,
+            timeText: it.timeText || '',
             busy: it.spinning,
             waiting: it.waiting || null,
+            lastHumanKey: it.lastHumanKey || null,
             lastAssistKey: it.lastAssistKey || null,
+            maxPairIndex: it.maxPairIndex ?? -1,
             mounted: it.mounted,
             isMaster: MASTER_CHAT_ID ? it.chatId.startsWith(MASTER_CHAT_ID) : false,
           });
