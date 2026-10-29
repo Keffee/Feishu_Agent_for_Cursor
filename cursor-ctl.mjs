@@ -116,8 +116,10 @@ export async function discoverAllSessions() {
       if (win.kind === 'agents') {
         const items = await cdp.evaluate(`(() => {
           const vis = e => { const b = e.getBoundingClientRect(); return b.width > 0 && b.height > 0 && getComputedStyle(e).visibility !== 'hidden'; };
+          const ROW_SEL = '[data-flat-index], .virtualized-composer-messages-row[data-index]';
           const STOP_SEL = 'button[aria-label="Stop generation"], .stop-button, .composer-button-area .codicon-debug-stop, .send-with-mode .codicon-debug-stop';
-          const WAIT = /^(?!.*(background|后台|copy|复制|stop))(run|allow|accept|approve|continue|yes\\b|运行|允许|接受|批准|继续)/i;
+          const SKIP = /ui-collapsible-header|md-clickable-code|ui-markdown__inline-code|output-preview|codicon-find|widget-close|model-picker|stop-button|ui-prompt-input-submit-button/;
+          const WAIT_EXACT = /^(run(\\s+command)?|allow|accept|approve|continue|yes|运行|允许|接受|批准|继续)$/i;
           const out = [];
           const seen = new Set();
           for (const li of document.querySelectorAll('li.ui-sidebar-menu-item[data-sidebar-item-key]')) {
@@ -139,18 +141,25 @@ export async function discoverAllSessions() {
                 || bubble.closest('.composer-messages-container');
               if (panel) {
                 paneBusy = [...panel.querySelectorAll(STOP_SEL)].some(vis);
-                const assistRows = [...panel.querySelectorAll('[data-find-row-key^="assistant-markdown:"]')];
-                if (assistRows.length) {
-                  lastAssistKey = assistRows[assistRows.length - 1].dataset.findRowKey || null;
+                const allRows = [...panel.querySelectorAll('[data-find-row-key]')];
+                const lastHumanIdx = allRows.reduce((acc, r, i) => (r.dataset.findRowKey || '').startsWith('human:') ? i : acc, -1);
+                const lastAssistIdx = allRows.reduce((acc, r, i) => (r.dataset.findRowKey || '').startsWith('assistant-markdown:') ? i : acc, -1);
+                if (lastAssistIdx >= 0 && lastAssistIdx > lastHumanIdx) {
+                  lastAssistKey = allRows[lastAssistIdx].dataset.findRowKey || null;
                 }
                 const qn = panel.querySelector('.composer-questionnaire-toolbar');
                 if (qn && vis(qn)) {
                   waiting = 'question:' + (qn.innerText || '').trim().slice(0, 120);
                 } else {
-                  const btns = [...panel.querySelectorAll('button, [role=button], .anysphere-button, .composer-run-button')]
-                    .filter(vis)
-                    .map(b => ((b.innerText || '').trim() || b.getAttribute('aria-label') || '').split('\\n')[0].slice(0, 30))
-                    .filter(l => WAIT.test(l));
+                  const rows = [...panel.querySelectorAll(ROW_SEL)].filter(e => !e.parentElement.closest(ROW_SEL));
+                  const btns = [];
+                  for (const r of rows.slice(-5)) {
+                    for (const b of r.querySelectorAll('button, [role=button], .anysphere-button, .composer-run-button')) {
+                      if (!vis(b) || SKIP.test(b.className) || /^stop/i.test(b.getAttribute('aria-label') || '') || b.parentElement.closest('button, [role=button]')) continue;
+                      const l = ((b.innerText || '').trim() || b.getAttribute('aria-label') || '').split('\\n')[0].trim().slice(0, 30);
+                      if (l && WAIT_EXACT.test(l)) btns.push(l);
+                    }
+                  }
                   if (btns.length) waiting = 'btn:' + btns.join('/');
                 }
               }
@@ -168,7 +177,7 @@ export async function discoverAllSessions() {
             ws: win.ws,
             chatId: it.chatId,
             name: it.repo ? `${it.repo} / ${it.title}` : it.title,
-            busy: it.spinning && !it.waiting,
+            busy: it.spinning,
             waiting: it.waiting || null,
             lastAssistKey: it.lastAssistKey || null,
             mounted: it.mounted,
@@ -253,9 +262,9 @@ export async function inspectSession(target, mountIfNeeded = true) {
       const vis = e => { const b = e.getBoundingClientRect(); return b.width > 0 && b.height > 0 && getComputedStyle(e).visibility !== 'hidden'; };
       const cleanText = el => (el?.innerText || el?.textContent || '').trim();
       const ROW_SEL = '[data-flat-index], .virtualized-composer-messages-row[data-index]';
-      const STOP_SEL = 'button[aria-label="Stop generation"], .composer-button-area .codicon-debug-stop, .send-with-mode .codicon-debug-stop';
-      const SKIP = /ui-collapsible-header|md-clickable-code|output-preview|codicon-find|widget-close|model-picker/;
-      const ACTION = /^(run|skip|allow|accept|reject|deny|approve|keep|undo|continue|stop|cancel|build|retry|yes|no\\b|运行|跳过|允许|接受|拒绝|继续|停止|取消)/i;
+      const STOP_SEL = 'button[aria-label="Stop generation"], .stop-button, .composer-button-area .codicon-debug-stop, .send-with-mode .codicon-debug-stop';
+      const SKIP = /ui-collapsible-header|md-clickable-code|ui-markdown__inline-code|output-preview|codicon-find|widget-close|model-picker|stop-button|ui-prompt-input-submit-button/;
+      const ACTION = /^(run(\\s+command)?|skip|allow|accept|reject|deny|approve|keep|undo|continue|cancel|build|retry|yes|no|运行|跳过|允许|接受|拒绝|继续|取消)$/i;
       const center = el => { const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; };
 
       const eds = [...document.querySelectorAll('.aislash-editor-input[contenteditable="true"], .ui-prompt-input-editor__input[contenteditable="true"], .composer-bar [contenteditable="true"]')];
@@ -299,14 +308,14 @@ export async function inspectSession(target, mountIfNeeded = true) {
       }).filter(x => x.text && !/^\\d+[smhd] ago$|^New messages below$/i.test(x.text));
 
       const buttonsIn = (root, strict) => [...root.querySelectorAll('button, [role=button], .anysphere-button, .anysphere-secondary-button, .composer-run-button, .composer-skip-button')]
-        .filter(b => !SKIP.test(b.className) && !b.parentElement.closest('button, [role=button]'))
-        .map(b => ({ el: b, label: (cleanText(b) || b.getAttribute('aria-label') || b.title || '').split('\\n')[0].slice(0, 30) }))
+        .filter(b => vis(b) && !SKIP.test(b.className) && !/^stop/i.test(b.getAttribute('aria-label') || '') && !b.parentElement.closest('button, [role=button]'))
+        .map(b => ({ el: b, label: (cleanText(b) || b.getAttribute('aria-label') || b.title || '').split('\\n')[0].trim().slice(0, 30) }))
         .filter(x => x.label && x.label !== 'Shell command options' && (!strict || ACTION.test(x.label)));
 
       const btns = [];
       for (const el of rows.slice(-5)) {
-        for (const b of buttonsIn(el, false)) {
-          if (!/background|后台|copy|复制|^stop\b/i.test(b.label) && ACTION.test(b.label)) {
+        for (const b of buttonsIn(el, true)) {
+          if (!/background|后台|copy|复制|^stop\\b/i.test(b.label)) {
             btns.push({ label: b.label, context: summary(el), pos: center(b.el) });
           }
         }

@@ -249,7 +249,8 @@ async function handleIncomingFeishu(ev) {
 
 // Proactive background watcher: monitors ALL sessions (including sidebar background items in Cursor Agents)
 function startProactiveWatcher() {
-  const stateMap = new Map(); // chatId -> { busy, idleTicks, waiting, waitTicks, toldWait, lastAssistKey }
+  const stateMap = new Map(); // chatId -> { busy, idleTicks, waiting, waitTicks, toldWait, pushedAssistKey }
+  const pushedAssistKeys = new Set();
   let running = false;
 
   setInterval(async () => {
@@ -260,13 +261,14 @@ function startProactiveWatcher() {
       for (const s of sessions) {
         let prev = stateMap.get(s.chatId);
         if (!prev) {
+          if (s.lastAssistKey) pushedAssistKeys.add(s.lastAssistKey);
           stateMap.set(s.chatId, {
             busy: s.busy,
             idleTicks: 0,
             waiting: s.waiting || null,
             waitTicks: 0,
             toldWait: Boolean(s.waiting),
-            lastAssistKey: s.lastAssistKey || null,
+            pushedAssistKey: s.lastAssistKey || null,
           });
           continue;
         }
@@ -282,45 +284,60 @@ function startProactiveWatcher() {
           lastAlertSession = s;
           const detail = await inspectSession(s, true).catch(() => null);
           const btns = detail?.buttons || [];
-          const lastItem = detail?.items?.[detail.items.length - 1]?.text?.slice(0, 1000) || s.waiting;
-          const btnText = btns.length
-            ? `\n\n⏳ **可点按钮**：${btns.map((b, i) => `\`[${i + 1}] ${b.label}\``).join(' ')}（左滑引用本消息回 \`允许\` 即可点击）`
-            : '';
-          await sendMarkdown(
-            `⏳ **进程 #${s.seq} 需要你确认/回答 · ${s.name}**\n\n` +
-            `${lastItem}${btnText}\n\n---\n` +
-            `💡 **左滑引用本条消息**可直接回复该进程（或发 \`#${s.seq} 你的指令\`）`,
-            null,
-            s,
-          ).catch(e => console.error('推送失败:', e.message));
+          // Only push waiting alert if there is an actual confirmation button or questionnaire
+          if (btns.length || String(s.waiting).startsWith('question:')) {
+            const lastItem = detail?.items?.[detail.items.length - 1]?.text?.slice(0, 1000) || s.waiting;
+            const btnText = btns.length
+              ? `\n\n⏳ **可点按钮**：${btns.map((b, i) => `\`[${i + 1}] ${b.label}\``).join(' ')}（左滑引用本消息回 \`允许\` 即可点击）`
+              : '';
+            await sendMarkdown(
+              `⏳ **进程 #${s.seq} 需要你确认/回答 · ${s.name}**\n\n` +
+              `${lastItem}${btnText}\n\n---\n` +
+              `💡 **左滑引用本条消息**可直接回复该进程（或发 \`#${s.seq} 你的指令\`）`,
+              null,
+              s,
+            ).catch(e => console.error('推送失败:', e.message));
+          }
         }
 
         // 2. Check busy -> idle transition OR new assistant reply while idle
         if (s.busy) {
           prev.busy = true;
           prev.idleTicks = 0;
-          if (s.lastAssistKey) prev.lastAssistKey = s.lastAssistKey;
           continue;
         }
 
         const finishedFromBusy = prev.busy && ++prev.idleTicks >= 2;
-        const newFastReply = !prev.busy && s.lastAssistKey && s.lastAssistKey !== prev.lastAssistKey;
+        const newFastReply = !prev.busy && s.lastAssistKey && !pushedAssistKeys.has(s.lastAssistKey);
 
         if (finishedFromBusy || newFastReply) {
           prev.busy = false;
           prev.idleTicks = 0;
-          if (s.lastAssistKey) prev.lastAssistKey = s.lastAssistKey;
-          lastAlertSession = s;
           const detail = await inspectSession(s, true).catch(() => null);
-          const lastAssistItem = [...(detail?.items || [])].reverse().find(i => i.k === 'assistant');
-          if (lastAssistItem?.rowKey) prev.lastAssistKey = lastAssistItem.rowKey;
+          const items = detail?.items || [];
+          const lastHumanIdx = items.reduce((acc, it, i) => it.k === 'human' ? i : acc, -1);
+          const lastAssistIdx = items.reduce((acc, it, i) => it.k === 'assistant' ? i : acc, -1);
+
+          // Must have an assistant reply AFTER the latest human message, and it must not have been pushed already!
+          if (lastAssistIdx < 0 || lastAssistIdx < lastHumanIdx) {
+            continue;
+          }
+          const lastAssistItem = items[lastAssistIdx];
+          if (lastAssistItem?.rowKey && pushedAssistKeys.has(lastAssistItem.rowKey)) {
+            continue;
+          }
+          if (lastAssistItem?.rowKey) {
+            pushedAssistKeys.add(lastAssistItem.rowKey);
+            prev.pushedAssistKey = lastAssistItem.rowKey;
+          }
+
+          lastAlertSession = s;
           const lastAssist = lastAssistItem?.text?.slice(0, 3000) || '';
-          const lastOther = detail?.items?.[detail.items.length - 1]?.text?.slice(0, 600) || '';
           const btns = detail?.buttons || [];
 
           if (s.isMaster) {
             await sendMarkdown(
-              `🤖 **总控 Agent (#${s.seq}) 回复：**\n\n${lastAssist || lastOther || '（已完成）'}`,
+              `🤖 **总控 Agent (#${s.seq}) 回复：**\n\n${lastAssist || '（已完成）'}`,
               null,
               s,
             ).catch(e => console.error('推送失败:', e.message));
@@ -330,7 +347,7 @@ function startProactiveWatcher() {
               : '';
             await sendMarkdown(
               `🔔 **子进程 #${s.seq} 状态更新 · ${s.name}**\n\n` +
-              `${lastAssist || lastOther || '（当前轮次已结束）'}${btnText}\n\n---\n` +
+              `${lastAssist || '（当前轮次已结束）'}${btnText}\n\n---\n` +
               `💡 **下一步怎么处理？**\n` +
               `- 想**直接回复该子进程**：请**左滑引用本条消息**回复（或发 \`#${s.seq} 你的指令\`）\n` +
               `- 想**跟总控商量或让总控代办**：直接在下方打字发送即可`,
