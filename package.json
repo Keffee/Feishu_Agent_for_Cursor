@@ -1,0 +1,38 @@
+{
+  "name": "feishu-agent-for-cursor",
+  "version": "1.0.0",
+  "description": "Autonomous Multi-Agent Feishu Bot & Master Controller for Cursor IDE via Chrome DevTools Protocol (CDP).",
+  "type": "module",
+  "main": "feishu.mjs",
+  "bin": {
+    "cursor-ctl": "./cursor-ctl.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Keffee/Feishu_Agent_for_Cursor.git"
+  },
+  "scripts": {
+    "start": "node feishu.mjs",
+    "feishu": "node feishu.mjs",
+    "ctl": "node cursor-ctl.mjs",
+    "list": "node cursor-ctl.mjs list",
+    "cursor:start": "./start-cursor.sh",
+    "service:install": "./service.sh install",
+    "service:uninstall": "./service.sh uninstall",
+    "service:status": "./service.sh status",
+    "service:logs": "./service.sh logs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "cursor",
+    "feishu",
+    "lark",
+    "agent",
+    "multi-agent",
+    "cdp",
+    "bot"
+  ],
+  "license": "MIT"
+}
