@@ -180,9 +180,3 @@ node cursor-ctl.mjs stop 2
 
 3. **[len5ky/CursorRemote](https://github.com/len5ky/CursorRemote)**
    - 最初启发了通过 Electron 远程调试端口（CDP）连接并控制本机 Cursor IDE 的思路。
-
----
-
-## License
-
-本项目沿用上游项目的 [MIT License](LICENSE)。
